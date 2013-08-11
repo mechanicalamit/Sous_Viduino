@@ -1,20 +1,21 @@
+/* Sous vide with DFRobot LCD shield
+ * Modified
+ */
 //-------------------------------------------------------------------
-//
-// Sous Vide Controller
-// Bill Earl - for Adafruit Industries
-//
-// Based on the Arduino PID and PID AutoTune Libraries 
-// by Brett Beauregard
-//------------------------------------------------------------------
+////
+//// Sous Vide Controller
+//// Bill Earl - for Adafruit Industries
+////
+//// Based on the Arduino PID and PID AutoTune Libraries
+//// by Brett Beauregard
+////------------------------------------------------------------------
 
 // PID Library
 #include <PID_v1.h>
 #include <PID_AutoTune_v0.h>
 
-// Libraries for the Adafruit RGB/LCD Shield
+#include <LiquidCrystal.h>
 #include <Wire.h>
-#include <Adafruit_MCP23017.h>
-#include <Adafruit_RGBLCDShield.h>
 
 // Libraries for the DS18B20 Temperature Sensor
 #include <OneWire.h>
@@ -23,6 +24,9 @@
 // So we can save and retrieve settings
 #include <EEPROM.h>
 
+#include"sous_vide.h"
+ 
+
 // ************************************************
 // Pin definitions
 // ************************************************
@@ -30,11 +34,8 @@
 // Output Relay
 #define RelayPin 7
 
-// One-Wire Temperature Sensor
-// (Use GPIO pins for power/ground to simplify the wiring)
+// Sensor Pin
 #define ONE_WIRE_BUS 2
-#define ONE_WIRE_PWR 3
-#define ONE_WIRE_GND 4
 
 // ************************************************
 // PID Variables and constants
@@ -77,20 +78,19 @@ unsigned int aTuneLookBack=20;
 boolean tuning = false;
 
 PID_ATune aTune(&Input, &Output);
+ 
+// select the pins used on the LCD panel
+LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
+ 
+// define some values used by the panel and buttons
 
-// ************************************************
-// DiSplay Variables and constants
-// ************************************************
+#define BUTTON_UP 0x08
+#define BUTTON_DOWN 0x04
+#define BUTTON_LEFT 0x10
+#define BUTTON_RIGHT 0x02
+#define BUTTON_SELECT 0x01
+#define BUTTON_NONE   0x00
 
-Adafruit_RGBLCDShield lcd = Adafruit_RGBLCDShield();
-// These #defines make it easy to set the backlight color
-#define RED 0x1
-#define YELLOW 0x3
-#define GREEN 0x2
-#define TEAL 0x6
-#define BLUE 0x4
-#define VIOLET 0x5
-#define WHITE 0x7
 
 #define BUTTON_SHIFT BUTTON_SELECT
 
@@ -117,10 +117,6 @@ long lastLogTime = 0;
 enum operatingState { OFF = 0, SETP, RUN, TUNE_P, TUNE_I, TUNE_D, AUTO};
 operatingState opState = OFF;
 
-// ************************************************
-// Sensor Variables and constants
-// Data wire is plugged into port 2 on the Arduino
-
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_BUS);
 
@@ -129,37 +125,55 @@ DallasTemperature sensors(&oneWire);
 
 // arrays to hold device address
 DeviceAddress tempSensor;
+ 
+// read the buttons
+uint8_t readButtons()
+{
+ int adc_key_in  = 0;
 
-// ************************************************
-// Setup and diSplay initial screen
-// ************************************************
+ adc_key_in = analogRead(0);      // read the value from the sensor
+ delay(5); // delay for debounce
+ if (abs(analogRead(0)-adc_key_in) > 5)
+  return BUTTON_NONE;  // when all others fail, return this...
+ // my buttons when read are centered at these valies: 0, 144, 329, 504, 741
+ // we add approx 50 to those values and check to see if we are close
+ if (adc_key_in > 1000) return BUTTON_NONE; // We make this the 1st option for speed reasons since it will be the most likely result
+ // For V1.1 us this threshold
+ if (adc_key_in < 50)   return BUTTON_RIGHT; 
+ if (adc_key_in < 250)  return BUTTON_UP;
+ if (adc_key_in < 450)  return BUTTON_DOWN;
+ if (adc_key_in < 650)  return BUTTON_LEFT;
+ if (adc_key_in < 850)  return BUTTON_SELECT; 
+ 
+ // For V1.0 comment the other threshold and use the one below:
+/*
+ if (adc_key_in < 50)   return BUTTON_RIGHT; 
+ if (adc_key_in < 195)  return BUTTON_UP;
+ if (adc_key_in < 380)  return BUTTON_DOWN;
+ if (adc_key_in < 555)  return BUTTON_LEFT;
+ if (adc_key_in < 790)  return BUTTON_SELECT;  
+*/
+ 
+ 
+ return BUTTON_NONE;  // when all others fail, return this...
+}
+ 
 void setup()
 {
-   Serial.begin(9600);
+ Serial.begin(9600);
+ 
 
    // Initialize Relay Control:
 
    pinMode(RelayPin, OUTPUT);    // Output mode to drive relay
    digitalWrite(RelayPin, LOW);  // make sure it is off to start
 
-   // Set up Ground & Power for the sensor from GPIO pins
-
-   pinMode(ONE_WIRE_GND, OUTPUT);
-   digitalWrite(ONE_WIRE_GND, LOW);
-
-   pinMode(ONE_WIRE_PWR, OUTPUT);
-   digitalWrite(ONE_WIRE_PWR, HIGH);
-
-   // Initialize LCD DiSplay 
-
-   lcd.begin(16, 2);
-   lcd.createChar(1, degree); // create degree symbol from the binary
-   
-   lcd.setBacklight(VIOLET);
+ lcd.begin(16, 2);              // start the library
+ lcd.setCursor(0,0);
    lcd.print(F("    Adafruit"));
    lcd.setCursor(0, 1);
    lcd.print(F("   Sous Vide!"));
-
+   
    // Start up the DS18B20 One Wire Temperature Sensor
 
    sensors.begin();
@@ -172,7 +186,7 @@ void setup()
    sensors.setWaitForConversion(false);
 
    delay(3000);  // Splash screen
-
+   
    // Initialize the PID and related variables
    LoadParameters();
    myPID.SetTunings(Kp,Ki,Kd);
@@ -186,6 +200,7 @@ void setup()
 
   //Timer2 Overflow Interrupt Enable
   TIMSK2 |= 1<<TOIE2;
+   
 }
 
 // ************************************************
@@ -244,7 +259,7 @@ void loop()
 void Off()
 {
    myPID.SetMode(MANUAL);
-   lcd.setBacklight(0);
+   //setBacklight(0);
    digitalWrite(RelayPin, LOW);  // make sure it is off
    lcd.print(F("    Adafruit"));
    lcd.setCursor(0, 1);
@@ -273,7 +288,7 @@ void Off()
 // ************************************************
 void Tune_Sp()
 {
-   lcd.setBacklight(TEAL);
+   //setBacklight(TEAL);
    lcd.print(F("Set Temperature:"));
    uint8_t buttons = 0;
    while(true)
@@ -327,7 +342,7 @@ void Tune_Sp()
 // ************************************************
 void TuneP()
 {
-   lcd.setBacklight(TEAL);
+   //setBacklight(TEAL);
    lcd.print(F("Set Kp"));
 
    uint8_t buttons = 0;
@@ -381,7 +396,7 @@ void TuneP()
 // ************************************************
 void TuneI()
 {
-   lcd.setBacklight(TEAL);
+   //setBacklight(TEAL);
    lcd.print(F("Set Ki"));
 
    uint8_t buttons = 0;
@@ -435,7 +450,7 @@ void TuneI()
 // ************************************************
 void TuneD()
 {
-   lcd.setBacklight(TEAL);
+   //setBacklight(TEAL);
    lcd.print(F("Set Kd"));
 
    uint8_t buttons = 0;
@@ -607,26 +622,10 @@ void DriveOutput()
 }
 
 // ************************************************
-// Set Backlight based on the state of control
+// Backlight does not exist yet. Try adding a RGB Led
 // ************************************************
 void setBacklight()
 {
-   if (tuning)
-   {
-      lcd.setBacklight(VIOLET); // Tuning Mode
-   }
-   else if (abs(Input - Setpoint) > 1.0)  
-   {
-      lcd.setBacklight(RED);  // High Alarm - off by more than 1 degree
-   }
-   else if (abs(Input - Setpoint) > 0.2)  
-   {
-      lcd.setBacklight(YELLOW);  // Low Alarm - off by more than 0.2 degrees
-   }
-   else
-   {
-      lcd.setBacklight(WHITE);  // We're on target!
-   }
 }
 
 // ************************************************
@@ -670,7 +669,7 @@ void FinishAutoTune()
 // ************************************************
 uint8_t ReadButtons()
 {
-  uint8_t buttons = lcd.readButtons();
+  uint8_t buttons = readButtons();
   if (buttons != 0)
   {
     lastInput = millis();
@@ -757,3 +756,5 @@ double EEPROM_readDouble(int address)
    }
    return value;
 }
+
+// vim:ft=c:
